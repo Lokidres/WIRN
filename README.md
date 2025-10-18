@@ -116,6 +116,17 @@ GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o wirn-macos main.go
 GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o wirn-macos-arm64 main.go
 ```
 
+### 🎯 Taşınabilir Binary Derleme (CTF & Portable)
+
+**CTF yarışmalarında ve kısıtlı ortamlarda kullanım için:**
+
+```bash
+# Taşınabilir binary derleme
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o wirn main.go
+```
+
+> **💡 Not:** `CGO_ENABLED=0` ile derlenen binary'ler tamamen statik olarak derlenir ve hiçbir dış kütüphane bağımlılığı gerektirmez. Bu, CTF ortamlarında veya minimal Linux dağıtımlarında çalıştırılabilir binary'ler oluşturur.
+
 ### 🐳 Docker ile Kurulum
 
 ```bash
