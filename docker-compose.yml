@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  wirn:
+    build: .
+    container_name: wirn-spy
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - TZ=UTC
+      - WIRN_STEALTH_MODE=true
+      - WIRN_LOG_FILE=/app/logs/wirn.log
+    command: ["./wirn", "--stealth", "--log", "--network", "--files", "--logfile", "/app/logs/wirn.log"]
+    networks:
+      - wirn-network
+    labels:
+      - "com.wirn.description=Advanced Process Spy Tool"
+      - "com.wirn.version=1.0.0"
+
+  wirn-web:
+    build: .
+    container_name: wirn-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs:ro
+      - ./web:/app/web
+    environment:
+      - WIRN_WEB_MODE=true
+      - WIRN_WEB_PORT=8080
+    command: ["./wirn", "--web", "--port", "8080"]
+    depends_on:
+      - wirn
+    networks:
+      - wirn-network
+
+networks:
+  wirn-network:
+    driver: bridge
+    name: wirn-network
+
+volumes:
+  wirn-logs:
+    driver: local
+  wirn-config:
+    driver: local
