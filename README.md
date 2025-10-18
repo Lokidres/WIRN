@@ -87,8 +87,8 @@
 
 ```bash
 # Repository'yi klonla
-git clone https://github.com/your-username/wirn.git
-cd wirn
+git clone https://github.com/Lokidres/WIRN.git
+cd WIRN
 
 # Dependencies'leri yükle
 go mod tidy
@@ -552,9 +552,9 @@ Bu araç sadece **eğitim amaçlı** ve **yetkili penetrasyon testleri** için t
 
 ## 📞 İletişim
 
-- **GitHub**: [github.com/your-username/wirn](https://github.com/your-username/wirn)
-- **Issues**: [GitHub Issues](https://github.com/your-username/wirn/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-username/wirn/discussions)
+- **GitHub**: [github.com/Lokidres/WIRN](https://github.com/Lokidres/WIRN)
+- **Issues**: [GitHub Issues](https://github.com/Lokidres/WIRN/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Lokidres/WIRN/discussions)
 
 ---
 
