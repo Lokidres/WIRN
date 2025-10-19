@@ -1,0 +1,47 @@
+[Unit]
+Description=WIRN - Enhanced Process Monitor
+Documentation=https://github.com/Lokidres/WIRN
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Binary location
+ExecStart=/usr/local/bin/wirn \
+    -proc \
+    -file \
+    -net \
+    -json \
+    -output /var/log/wirn/events.log \
+    -loglevel info \
+    -interval 1000
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wirn
+
+# Working directory
+WorkingDirectory=/var/lib/wirn
+
+# Permissions
+RuntimeDirectory=wirn
+StateDirectory=wirn
+LogsDirectory=wirn
+
+[Install]
+WantedBy=multi-user.target

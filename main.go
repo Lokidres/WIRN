@@ -2,17 +2,26 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -24,6 +33,13 @@ const (
 	ColorPurple = "\033[35m"
 	ColorCyan   = "\033[36m"
 	ColorWhite  = "\033[37m"
+)
+
+const (
+	MaxCacheSize    = 10000
+	CacheTTL        = 5 * time.Minute
+	MinInterval     = 500 // minimum milliseconds
+	ShutdownTimeout = 10 * time.Second
 )
 
 type Config struct {
@@ -40,6 +56,8 @@ type Config struct {
 	ShowTree       bool
 	IncludeEnv     bool
 	MaxEvents      int
+	WatchDirs      []string
+	LogLevel       string
 }
 
 type ProcessEvent struct {
@@ -72,12 +90,14 @@ type NetworkEvent struct {
 }
 
 var (
-	config          Config
-	seenProcesses   = make(map[int]bool)
-	processMutex    sync.Mutex
-	outputMutex     sync.Mutex
-	eventCount      int
-	suspiciousTerms = []string{
+	config             Config
+	seenProcesses      *expirable.LRU[int, bool]
+	seenConnections    *expirable.LRU[string, bool]
+	outputMutex        sync.Mutex
+	eventCount         atomic.Int64
+	log                *logrus.Logger
+	outputFile         *os.File
+	suspiciousTerms    = []string{
 		"nc ", "ncat", "netcat", "/dev/tcp", "/dev/udp",
 		"bash -i", "sh -i", "/bin/sh", "/bin/bash",
 		"python -c", "perl -e", "ruby -e",
@@ -91,26 +111,57 @@ var (
 
 func main() {
 	parseFlags()
+	initLogger()
 
-	printBanner()
-
-	if !config.Quiet {
-		fmt.Printf("%s[*] Starting WIRN - Enhanced Process Monitor%s\n", ColorCyan, ColorReset)
-		fmt.Printf("%s[*] Process Scan: %v | File Scan: %v | Network Scan: %v%s\n",
-			ColorCyan, config.ProcScan, config.FileScan, config.NetworkScan, ColorReset)
-		if config.SuspiciousOnly {
-			fmt.Printf("%s[*] Suspicious Activity Detection: ENABLED%s\n", ColorYellow, ColorReset)
-		}
-		fmt.Println()
+	if err := checkPrivileges(); err != nil {
+		log.Fatal(err)
 	}
 
+	if !config.Quiet {
+		printBanner()
+	}
+
+	if config.Interval < MinInterval {
+		log.Warnf("Interval too low, setting to minimum: %dms", MinInterval)
+		config.Interval = MinInterval
+	}
+
+	seenProcesses = expirable.NewLRU[int, bool](MaxCacheSize, nil, CacheTTL)
+	seenConnections = expirable.NewLRU[string, bool](MaxCacheSize, nil, CacheTTL)
+
+	if config.OutputFile != "" {
+		var err error
+		outputFile, err = os.OpenFile(config.OutputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatalf("Failed to open output file: %v", err)
+		}
+		defer outputFile.Close()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
 	var wg sync.WaitGroup
+
+	if !config.Quiet {
+		log.Infof("Starting WIRN - Enhanced Process Monitor")
+		log.Infof("Process Scan: %v | File Scan: %v | Network Scan: %v",
+			config.ProcScan, config.FileScan, config.NetworkScan)
+		if config.SuspiciousOnly {
+			log.Warn("Suspicious Activity Detection: ENABLED")
+		}
+	}
 
 	if config.ProcScan {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			monitorProcesses()
+			if err := monitorProcesses(ctx); err != nil {
+				log.Errorf("Process monitoring error: %v", err)
+			}
 		}()
 	}
 
@@ -118,7 +169,9 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			monitorFileSystem()
+			if err := monitorFileSystem(ctx); err != nil {
+				log.Errorf("File monitoring error: %v", err)
+			}
 		}()
 	}
 
@@ -126,18 +179,35 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			monitorNetwork()
+			if err := monitorNetwork(ctx); err != nil {
+				log.Errorf("Network monitoring error: %v", err)
+			}
 		}()
 	}
 
-	wg.Wait()
+	<-sigChan
+	log.Info("Shutdown signal received, cleaning up...")
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info("Graceful shutdown complete")
+	case <-time.After(ShutdownTimeout):
+		log.Warn("Shutdown timeout reached, forcing exit")
+	}
 }
 
 func parseFlags() {
 	flag.BoolVar(&config.ProcScan, "proc", true, "Monitor processes")
 	flag.BoolVar(&config.FileScan, "file", false, "Monitor file system events")
 	flag.BoolVar(&config.NetworkScan, "net", false, "Monitor network connections")
-	flag.IntVar(&config.Interval, "interval", 100, "Scan interval in milliseconds")
+	flag.IntVar(&config.Interval, "interval", 1000, "Scan interval in milliseconds")
 	flag.BoolVar(&config.OutputJSON, "json", false, "Output in JSON format")
 	flag.StringVar(&config.OutputFile, "output", "", "Output file path")
 	flag.StringVar(&config.FilterUser, "user", "", "Filter by username")
@@ -147,15 +217,37 @@ func parseFlags() {
 	flag.BoolVar(&config.ShowTree, "tree", false, "Show process tree")
 	flag.BoolVar(&config.IncludeEnv, "env", false, "Include environment variables")
 	flag.IntVar(&config.MaxEvents, "max", 0, "Maximum events to capture (0 = unlimited)")
+	flag.StringVar(&config.LogLevel, "loglevel", "info", "Log level (debug, info, warn, error)")
+
+	watchDirsFlag := flag.String("watchdirs", "/tmp,/var/tmp,/dev/shm,/etc", "Comma-separated list of directories to watch")
 
 	flag.Parse()
+
+	config.WatchDirs = strings.Split(*watchDirsFlag, ",")
+}
+
+func initLogger() {
+	log = logrus.New()
+	log.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+		ForceColors:   true,
+	})
+
+	level, err := logrus.ParseLevel(config.LogLevel)
+	if err != nil {
+		level = logrus.InfoLevel
+	}
+	log.SetLevel(level)
+}
+
+func checkPrivileges() error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("this tool requires root privileges (run with sudo)")
+	}
+	return nil
 }
 
 func printBanner() {
-	if config.Quiet {
-		return
-	}
-
 	banner := `
 ██╗    ██╗██╗██████╗ ███╗   ██╗
 ██║    ██║██║██╔══██╗████╗  ██║
@@ -166,61 +258,69 @@ func printBanner() {
                                 
 Watch Inspect Report Notify
 Enhanced Process Monitoring Tool
-Version 1.0.0
+Version 2.0.0 - Production Ready
 `
 	fmt.Printf("%s%s%s\n", ColorGreen, banner, ColorReset)
 }
 
-func monitorProcesses() {
+func monitorProcesses(ctx context.Context) error {
+	ticker := time.NewTicker(time.Duration(config.Interval) * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
-		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
-			return
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if config.MaxEvents > 0 && eventCount.Load() >= int64(config.MaxEvents) {
+				return nil
+			}
+
+			if err := scanProcesses(); err != nil {
+				log.Debugf("Process scan error: %v", err)
+			}
 		}
-
-		files, err := ioutil.ReadDir("/proc")
-		if err != nil {
-			continue
-		}
-
-		for _, f := range files {
-			if !f.IsDir() {
-				continue
-			}
-
-			var pid int
-			if _, err := fmt.Sscanf(f.Name(), "%d", &pid); err != nil {
-				continue
-			}
-
-			processMutex.Lock()
-			if seenProcesses[pid] {
-				processMutex.Unlock()
-				continue
-			}
-			processMutex.Unlock()
-
-			event := getProcessInfo(pid)
-			if event == nil {
-				continue
-			}
-
-			if shouldFilterEvent(event) {
-				continue
-			}
-
-			processMutex.Lock()
-			seenProcesses[pid] = true
-			processMutex.Unlock()
-
-			outputEvent(event)
-		}
-
-		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
 	}
 }
 
+func scanProcesses() error {
+	files, err := os.ReadDir("/proc")
+	if err != nil {
+		return fmt.Errorf("failed to read /proc: %w", err)
+	}
+
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+
+		var pid int
+		if _, err := fmt.Sscanf(f.Name(), "%d", &pid); err != nil {
+			continue
+		}
+
+		if seenProcesses.Contains(pid) {
+			continue
+		}
+
+		event := getProcessInfo(pid)
+		if event == nil {
+			continue
+		}
+
+		if shouldFilterEvent(event) {
+			continue
+		}
+
+		seenProcesses.Add(pid, true)
+		outputEvent(event)
+	}
+
+	return nil
+}
+
 func getProcessInfo(pid int) *ProcessEvent {
-	cmdlineBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	cmdlineBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return nil
 	}
@@ -232,7 +332,7 @@ func getProcessInfo(pid int) *ProcessEvent {
 		return nil
 	}
 
-	statBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	statBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return nil
 	}
@@ -245,7 +345,7 @@ func getProcessInfo(pid int) *ProcessEvent {
 	var ppid int
 	fmt.Sscanf(statFields[3], "%d", &ppid)
 
-	statusBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	statusBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	var user string
 	if err == nil {
 		scanner := bufio.NewScanner(strings.NewReader(string(statusBytes)))
@@ -267,11 +367,11 @@ func getProcessInfo(pid int) *ProcessEvent {
 	}
 
 	event := &ProcessEvent{
-		Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
+		Timestamp:  time.Now().Format(time.RFC3339),
 		PID:        pid,
 		PPID:       ppid,
 		User:       user,
-		Command:    strings.Split(cmdline, " ")[0],
+		Command:    filepath.Base(strings.Split(cmdline, " ")[0]),
 		CmdLine:    cmdline,
 		Cwd:        cwd,
 		Suspicious: isSuspicious(cmdline),
@@ -291,7 +391,7 @@ func getUserName(uid string) string {
 		return uid
 	}
 
-	fields := strings.Split(string(output), ":")
+	fields := strings.Split(strings.TrimSpace(string(output)), ":")
 	if len(fields) > 0 {
 		return fields[0]
 	}
@@ -301,13 +401,16 @@ func getUserName(uid string) string {
 
 func getEnvironment(pid int) map[string]string {
 	env := make(map[string]string)
-	envBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	envBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
 	if err != nil {
 		return env
 	}
 
 	envVars := strings.Split(string(envBytes), "\x00")
 	for _, e := range envVars {
+		if e == "" {
+			continue
+		}
 		parts := strings.SplitN(e, "=", 2)
 		if len(parts) == 2 {
 			env[parts[0]] = parts[1]
@@ -337,7 +440,11 @@ func shouldFilterEvent(event *ProcessEvent) bool {
 	}
 
 	if config.FilterCmd != "" {
-		matched, _ := regexp.MatchString(config.FilterCmd, event.CmdLine)
+		matched, err := regexp.MatchString(config.FilterCmd, event.CmdLine)
+		if err != nil {
+			log.Debugf("Regex error: %v", err)
+			return true
+		}
 		if !matched {
 			return true
 		}
@@ -350,14 +457,18 @@ func outputEvent(event *ProcessEvent) {
 	outputMutex.Lock()
 	defer outputMutex.Unlock()
 
-	eventCount++
+	eventCount.Add(1)
 
 	if config.OutputJSON {
-		jsonData, _ := json.Marshal(event)
+		jsonData, err := json.Marshal(event)
+		if err != nil {
+			log.Errorf("JSON marshal error: %v", err)
+			return
+		}
 		output := string(jsonData)
 
-		if config.OutputFile != "" {
-			appendToFile(output)
+		if outputFile != nil {
+			fmt.Fprintln(outputFile, output)
 		} else {
 			fmt.Println(output)
 		}
@@ -381,72 +492,95 @@ func outputEvent(event *ProcessEvent) {
 		output += fmt.Sprintf("%s  ⚠ SUSPICIOUS ACTIVITY DETECTED!%s\n", ColorRed, ColorReset)
 	}
 
-	if config.OutputFile != "" {
-		appendToFile(output)
+	if outputFile != nil {
+		fmt.Fprint(outputFile, output)
 	} else {
 		fmt.Print(output)
 	}
 }
 
-func monitorFileSystem() {
-	if !config.Quiet {
-		fmt.Printf("%s[*] File system monitoring is experimental%s\n", ColorYellow, ColorReset)
+func monitorFileSystem(ctx context.Context) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	for _, dir := range config.WatchDirs {
+		if err := watcher.Add(dir); err != nil {
+			log.Warnf("Failed to watch %s: %v", dir, err)
+			continue
+		}
+		log.Infof("Watching directory: %s", dir)
 	}
 
-	watchDirs := []string{"/tmp", "/var/tmp", "/dev/shm", "/etc"}
-
 	for {
-		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
-			return
-		}
-
-		for _, dir := range watchDirs {
-			filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-
-				if info.ModTime().After(time.Now().Add(-time.Duration(config.Interval) * time.Millisecond)) {
-					event := &FileEvent{
-						Timestamp: time.Now().Format("2006-01-02 15:04:05"),
-						Path:      path,
-						Event:     "MODIFIED",
-					}
-
-					if config.OutputJSON {
-						jsonData, _ := json.Marshal(event)
-						fmt.Println(string(jsonData))
-					} else {
-						fmt.Printf("%s[%s] FILE: %s - %s%s\n",
-							ColorYellow, event.Timestamp, event.Event, event.Path, ColorReset)
-					}
-				}
-
+		select {
+		case <-ctx.Done():
+			return nil
+		case event, ok := <-watcher.Events:
+			if !ok {
 				return nil
-			})
-		}
+			}
 
-		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
+			if config.MaxEvents > 0 && eventCount.Load() >= int64(config.MaxEvents) {
+				return nil
+			}
+
+			fileEvent := &FileEvent{
+				Timestamp: time.Now().Format(time.RFC3339),
+				Path:      event.Name,
+				Event:     event.Op.String(),
+			}
+
+			if config.OutputJSON {
+				jsonData, _ := json.Marshal(fileEvent)
+				fmt.Println(string(jsonData))
+			} else {
+				fmt.Printf("%s[%s] FILE: %s - %s%s\n",
+					ColorYellow, fileEvent.Timestamp, fileEvent.Event, fileEvent.Path, ColorReset)
+			}
+
+			eventCount.Add(1)
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
+			log.Errorf("Watcher error: %v", err)
+		}
 	}
 }
 
-func monitorNetwork() {
-	if !config.Quiet {
-		fmt.Printf("%s[*] Network monitoring started%s\n", ColorCyan, ColorReset)
-	}
+func monitorNetwork(ctx context.Context) error {
+	log.Info("Network monitoring started")
 
-	seenConnections := make(map[string]bool)
+	ticker := time.NewTicker(time.Duration(config.Interval) * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
-		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
-			return
-		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if config.MaxEvents > 0 && eventCount.Load() >= int64(config.MaxEvents) {
+				return nil
+			}
 
-		connections := getNetworkConnections()
-		for _, conn := range connections {
-			key := fmt.Sprintf("%s:%s->%s", conn.Protocol, conn.LocalAddr, conn.RemoteAddr)
-			if !seenConnections[key] {
-				seenConnections[key] = true
+			connections, err := getNetworkConnections()
+			if err != nil {
+				log.Debugf("Network scan error: %v", err)
+				continue
+			}
+
+			for _, conn := range connections {
+				key := fmt.Sprintf("%s:%s->%s", conn.Protocol, conn.LocalAddr, conn.RemoteAddr)
+				
+				if seenConnections.Contains(key) {
+					continue
+				}
+
+				seenConnections.Add(key, true)
 
 				if config.OutputJSON {
 					jsonData, _ := json.Marshal(conn)
@@ -456,23 +590,23 @@ func monitorNetwork() {
 						ColorBlue, conn.Timestamp, conn.Protocol, conn.LocalAddr,
 						conn.RemoteAddr, conn.State, conn.PID, conn.Process, ColorReset)
 				}
+
+				eventCount.Add(1)
 			}
 		}
-
-		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
 	}
 }
 
-func getNetworkConnections() []NetworkEvent {
+func getNetworkConnections() ([]NetworkEvent, error) {
 	var events []NetworkEvent
 
-	tcpFile, err := ioutil.ReadFile("/proc/net/tcp")
+	tcpFile, err := os.ReadFile("/proc/net/tcp")
 	if err != nil {
-		return events
+		return nil, fmt.Errorf("failed to read /proc/net/tcp: %w", err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(tcpFile)))
-	scanner.Scan()
+	scanner.Scan() // skip header
 
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -480,21 +614,23 @@ func getNetworkConnections() []NetworkEvent {
 			continue
 		}
 
+		var pid int
+		fmt.Sscanf(fields[9], "%d", &pid)
+
 		event := NetworkEvent{
-			Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
+			Timestamp:  time.Now().Format(time.RFC3339),
 			Protocol:   "TCP",
 			LocalAddr:  parseAddr(fields[1]),
 			RemoteAddr: parseAddr(fields[2]),
 			State:      getTCPState(fields[3]),
+			PID:        pid,
+			Process:    getProcessName(pid),
 		}
-
-		fmt.Sscanf(fields[9], "%d", &event.PID)
-		event.Process = getProcessName(event.PID)
 
 		events = append(events, event)
 	}
 
-	return events
+	return events, nil
 }
 
 func parseAddr(addr string) string {
@@ -502,7 +638,23 @@ func parseAddr(addr string) string {
 	if len(parts) != 2 {
 		return addr
 	}
-	return addr
+
+	ipHex := parts[0]
+	portHex := parts[1]
+
+	ipBytes, err := hex.DecodeString(ipHex)
+	if err != nil || len(ipBytes) != 4 {
+		return addr
+	}
+
+	ip := fmt.Sprintf("%d.%d.%d.%d", ipBytes[3], ipBytes[2], ipBytes[1], ipBytes[0])
+
+	port, err := strconv.ParseInt(portHex, 16, 64)
+	if err != nil {
+		return addr
+	}
+
+	return fmt.Sprintf("%s:%d", ip, port)
 }
 
 func getTCPState(state string) string {
@@ -527,7 +679,7 @@ func getTCPState(state string) string {
 }
 
 func getProcessName(pid int) string {
-	cmdline, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return "unknown"
 	}
@@ -539,16 +691,5 @@ func getProcessName(pid int) string {
 		return "unknown"
 	}
 
-	return strings.Split(name, " ")[0]
-}
-
-func appendToFile(content string) {
-	f, err := os.OpenFile(config.OutputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening output file: %v\n", err)
-		return
-	}
-	defer f.Close()
-
-	f.WriteString(content + "\n")
+	return filepath.Base(strings.Split(name, " ")[0])
 }
