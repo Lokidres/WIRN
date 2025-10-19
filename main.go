@@ -1,784 +1,554 @@
 package main
 
 import (
-	"context"
+	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"os"
-	"os/signal"
+	"os/exec"
+	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-
-	"github.com/fatih/color"
-	"github.com/shirou/gopsutil/v3/process"
-	"github.com/spf13/cobra"
 )
 
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorPurple = "\033[35m"
+	ColorCyan   = "\033[36m"
+	ColorWhite  = "\033[37m"
+)
+
+type Config struct {
+	ProcScan       bool
+	FileScan       bool
+	NetworkScan    bool
+	Interval       int
+	OutputJSON     bool
+	OutputFile     string
+	FilterUser     string
+	FilterCmd      string
+	SuspiciousOnly bool
+	Quiet          bool
+	ShowTree       bool
+	IncludeEnv     bool
+	MaxEvents      int
+}
+
 type ProcessEvent struct {
-	Timestamp     time.Time `json:"timestamp"`
-	PID           int32     `json:"pid"`
-	PPID          int32     `json:"ppid"`
-	ProcessName   string    `json:"process_name"`
-	Command       string    `json:"command"`
-	User          string    `json:"user"`
-	EventType     string    `json:"event_type"`
-	Details       string    `json:"details"`
-	FilePath      string    `json:"file_path,omitempty"`
-	NetworkInfo   string    `json:"network_info,omitempty"`
-	SecurityLevel string    `json:"security_level,omitempty"`
-	ThreatVector  string    `json:"threat_vector,omitempty"`
-	RiskScore     int       `json:"risk_score,omitempty"`
-	AlertMessage  string    `json:"alert_message,omitempty"`
+	Timestamp   string            `json:"timestamp"`
+	PID         int               `json:"pid"`
+	PPID        int               `json:"ppid"`
+	User        string            `json:"user"`
+	Command     string            `json:"command"`
+	CmdLine     string            `json:"cmdline"`
+	Cwd         string            `json:"cwd,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
+	Suspicious  bool              `json:"suspicious"`
 }
 
-type WirnConfig struct {
-	StealthMode       bool
-	LogToFile         bool
-	LogFile           string
-	FilterProcesses   []string
-	FilterUsers       []string
-	FilterCommands     []string
-	MonitorNetwork     bool
-	MonitorFiles       bool
-	Verbose            bool
-	JSONOutput         bool
-	ColorOutput        bool
-	RefreshRate        time.Duration
-	MaxLogSize         int64
-	SecurityDetection  bool
-	AlertMode          bool
-	RiskThreshold      int
-	HighlightThreats   bool
+type FileEvent struct {
+	Timestamp string `json:"timestamp"`
+	Path      string `json:"path"`
+	Event     string `json:"event"`
+	Process   string `json:"process,omitempty"`
 }
 
-type SecurityPattern struct {
-	Name        string
-	Pattern     *regexp.Regexp
-	RiskScore   int
-	ThreatVector string
-	Description string
-}
-
-type ProcessMonitor struct {
-	config         *WirnConfig
-	events         chan ProcessEvent
-	knownProcesses map[int32]*process.Process
-	mutex          sync.RWMutex
-	logFile        *os.File
-	stopChan       chan bool
-	evasionCount   int
-	securityPatterns map[string]*SecurityPattern
-	threatCount    int
+type NetworkEvent struct {
+	Timestamp  string `json:"timestamp"`
+	PID        int    `json:"pid"`
+	Process    string `json:"process"`
+	Protocol   string `json:"protocol"`
+	LocalAddr  string `json:"local_addr"`
+	RemoteAddr string `json:"remote_addr"`
+	State      string `json:"state"`
 }
 
 var (
-	config  WirnConfig
-	monitor *ProcessMonitor
+	config          Config
+	seenProcesses   = make(map[int]bool)
+	processMutex    sync.Mutex
+	outputMutex     sync.Mutex
+	eventCount      int
+	suspiciousTerms = []string{
+		"nc ", "ncat", "netcat", "/dev/tcp", "/dev/udp",
+		"bash -i", "sh -i", "/bin/sh", "/bin/bash",
+		"python -c", "perl -e", "ruby -e",
+		"wget ", "curl ", "base64 -d",
+		"chmod +x", "chmod 777",
+		"/tmp/", "/var/tmp/", "/dev/shm/",
+		"sudo ", "su -", "passwd",
+		"crontab", "at ", "systemctl",
+	}
 )
 
-func init() {
-	rootCmd.Flags().BoolVarP(&config.StealthMode, "stealth", "s", false, "Stealth mode - minimize detection")
-	rootCmd.Flags().BoolVarP(&config.LogToFile, "log", "l", false, "Log events to file")
-	rootCmd.Flags().StringVarP(&config.LogFile, "logfile", "f", "wirn.log", "Log file path")
-	rootCmd.Flags().StringSliceVarP(&config.FilterProcesses, "filter-process", "p", []string{}, "Filter specific processes")
-	rootCmd.Flags().StringSliceVarP(&config.FilterUsers, "filter-user", "u", []string{}, "Filter specific users")
-	rootCmd.Flags().StringSliceVarP(&config.FilterCommands, "filter-command", "c", []string{}, "Filter specific commands")
-	rootCmd.Flags().BoolVarP(&config.MonitorNetwork, "network", "n", false, "Monitor network connections")
-	rootCmd.Flags().BoolVarP(&config.MonitorFiles, "files", "F", false, "Monitor file operations")
-	rootCmd.Flags().BoolVarP(&config.Verbose, "verbose", "v", false, "Verbose output")
-	rootCmd.Flags().BoolVarP(&config.JSONOutput, "json", "j", false, "JSON output format")
-	rootCmd.Flags().BoolVarP(&config.ColorOutput, "color", "C", true, "Colorized output")
-	rootCmd.Flags().DurationVarP(&config.RefreshRate, "refresh", "r", 100*time.Millisecond, "Refresh rate")
-	rootCmd.Flags().Int64VarP(&config.MaxLogSize, "max-log-size", "m", 100*1024*1024, "Maximum log file size in bytes")
-	rootCmd.Flags().BoolVarP(&config.SecurityDetection, "security", "S", true, "Enable security pattern detection")
-	rootCmd.Flags().BoolVarP(&config.AlertMode, "alerts", "A", false, "Enable alert mode for high-risk events")
-	rootCmd.Flags().IntVarP(&config.RiskThreshold, "risk-threshold", "t", 7, "Risk score threshold for alerts (1-10)")
-	rootCmd.Flags().BoolVarP(&config.HighlightThreats, "highlight", "H", true, "Highlight threat vectors and security events")
-}
-
-var rootCmd = &cobra.Command{
-	Use:   "wirn",
-	Short: "Advanced Process Spy Tool - pspy64 alternative",
-	Long: `Wirn is an advanced process monitoring tool designed for offensive security.
-It provides comprehensive process tracking, system call monitoring, and stealth capabilities.`,
-	Run: runWirn,
-}
-
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		log.Fatal(err)
-	}
-}
+	parseFlags()
 
-func runWirn(cmd *cobra.Command, args []string) {
-	if config.StealthMode {
-		enableStealthMode()
-	}
+	printBanner()
 
-	monitor = NewProcessMonitor(&config)
-	defer monitor.Cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		cancel()
-	}()
-
-	if config.LogToFile {
-		if err := monitor.SetupLogFile(); err != nil {
-			log.Printf("Log file setup failed: %v", err)
+	if !config.Quiet {
+		fmt.Printf("%s[*] Starting WIRN - Enhanced Process Monitor%s\n", ColorCyan, ColorReset)
+		fmt.Printf("%s[*] Process Scan: %v | File Scan: %v | Network Scan: %v%s\n",
+			ColorCyan, config.ProcScan, config.FileScan, config.NetworkScan, ColorReset)
+		if config.SuspiciousOnly {
+			fmt.Printf("%s[*] Suspicious Activity Detection: ENABLED%s\n", ColorYellow, ColorReset)
 		}
+		fmt.Println()
 	}
 
-	go monitor.StartMonitoring(ctx)
-	go monitor.ProcessEvents(ctx)
+	var wg sync.WaitGroup
 
-	monitor.DisplayHeader()
-	monitor.Run(ctx)
+	if config.ProcScan {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			monitorProcesses()
+		}()
+	}
+
+	if config.FileScan {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			monitorFileSystem()
+		}()
+	}
+
+	if config.NetworkScan {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			monitorNetwork()
+		}()
+	}
+
+	wg.Wait()
 }
 
-func NewProcessMonitor(cfg *WirnConfig) *ProcessMonitor {
-	pm := &ProcessMonitor{
-		config:         cfg,
-		events:         make(chan ProcessEvent, 1000),
-		knownProcesses: make(map[int32]*process.Process),
-		stopChan:       make(chan bool),
-		securityPatterns: make(map[string]*SecurityPattern),
-		threatCount:    0,
-	}
-	
-	if cfg.SecurityDetection {
-		pm.initializeSecurityPatterns()
-	}
-	
-	return pm
+func parseFlags() {
+	flag.BoolVar(&config.ProcScan, "proc", true, "Monitor processes")
+	flag.BoolVar(&config.FileScan, "file", false, "Monitor file system events")
+	flag.BoolVar(&config.NetworkScan, "net", false, "Monitor network connections")
+	flag.IntVar(&config.Interval, "interval", 100, "Scan interval in milliseconds")
+	flag.BoolVar(&config.OutputJSON, "json", false, "Output in JSON format")
+	flag.StringVar(&config.OutputFile, "output", "", "Output file path")
+	flag.StringVar(&config.FilterUser, "user", "", "Filter by username")
+	flag.StringVar(&config.FilterCmd, "cmd", "", "Filter by command pattern")
+	flag.BoolVar(&config.SuspiciousOnly, "suspicious", false, "Show only suspicious activities")
+	flag.BoolVar(&config.Quiet, "quiet", false, "Quiet mode - no banner")
+	flag.BoolVar(&config.ShowTree, "tree", false, "Show process tree")
+	flag.BoolVar(&config.IncludeEnv, "env", false, "Include environment variables")
+	flag.IntVar(&config.MaxEvents, "max", 0, "Maximum events to capture (0 = unlimited)")
+
+	flag.Parse()
 }
 
-func (pm *ProcessMonitor) SetupLogFile() error {
-	var err error
-	pm.logFile, err = os.OpenFile(pm.config.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
+func printBanner() {
+	if config.Quiet {
+		return
 	}
-	return nil
+
+	banner := `
+██╗    ██╗██╗██████╗ ███╗   ██╗
+██║    ██║██║██╔══██╗████╗  ██║
+██║ █╗ ██║██║██████╔╝██╔██╗ ██║
+██║███╗██║██║██╔══██╗██║╚██╗██║
+╚███╔███╔╝██║██║  ██║██║ ╚████║
+ ╚══╝╚══╝ ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝
+                                
+Watch Inspect Report Notify
+Enhanced Process Monitoring Tool
+Version 1.0.0
+`
+	fmt.Printf("%s%s%s\n", ColorGreen, banner, ColorReset)
 }
 
-func (pm *ProcessMonitor) Cleanup() {
-	if pm.logFile != nil {
-		pm.logFile.Close()
-	}
-}
-
-func (pm *ProcessMonitor) initializeSecurityPatterns() {
-	patterns := []SecurityPattern{
-		{
-			Name:        "Password Dump",
-			Pattern:     regexp.MustCompile(`(?i)(mimikatz|pwdump|samdump|hashdump|secretsdump)`),
-			RiskScore:   10,
-			ThreatVector: "Credential Access",
-			Description: "Password dumping tool detected",
-		},
-		{
-			Name:        "Privilege Escalation",
-			Pattern:     regexp.MustCompile(`(?i)(sudo|su|runas|psexec|at|schtasks|wmic.*privilege)`),
-			RiskScore:   8,
-			ThreatVector: "Privilege Escalation",
-			Description: "Privilege escalation attempt detected",
-		},
-		{
-			Name:        "Lateral Movement",
-			Pattern:     regexp.MustCompile(`(?i)(psexec|wmi|smb|rdp|ssh.*-o|net.*use|mount)`),
-			RiskScore:   9,
-			ThreatVector: "Lateral Movement",
-			Description: "Lateral movement technique detected",
-		},
-		{
-			Name:        "Persistence",
-			Pattern:     regexp.MustCompile(`(?i)(schtasks|at|crontab|registry.*run|startup|autorun)`),
-			RiskScore:   7,
-			ThreatVector: "Persistence",
-			Description: "Persistence mechanism detected",
-		},
-		{
-			Name:        "Command Injection",
-			Pattern:     regexp.MustCompile(`(?i)(cmd\.exe|powershell|bash|sh|cmd.*\/c|powershell.*-e)`),
-			RiskScore:   6,
-			ThreatVector: "Command Injection",
-			Description: "Command injection attempt detected",
-		},
-		{
-			Name:        "Network Reconnaissance",
-			Pattern:     regexp.MustCompile(`(?i)(nmap|masscan|zmap|netdiscover|arp-scan)`),
-			RiskScore:   5,
-			ThreatVector: "Reconnaissance",
-			Description: "Network reconnaissance tool detected",
-		},
-		{
-			Name:        "Crypto Mining",
-			Pattern:     regexp.MustCompile(`(?i)(xmrig|minerd|cpuminer|cryptonight|monero)`),
-			RiskScore:   4,
-			ThreatVector: "Crypto Mining",
-			Description: "Cryptocurrency mining detected",
-		},
-		{
-			Name:        "Reverse Shell",
-			Pattern:     regexp.MustCompile(`(?i)(nc.*-e|netcat.*-e|bash.*-i|powershell.*-enc|msfvenom)`),
-			RiskScore:   9,
-			ThreatVector: "Command & Control",
-			Description: "Reverse shell attempt detected",
-		},
-		{
-			Name:        "File Encryption",
-			Pattern:     regexp.MustCompile(`(?i)(encrypt|ransom|crypt|locky|wannacry)`),
-			RiskScore:   8,
-			ThreatVector: "Ransomware",
-			Description: "File encryption/ransomware activity detected",
-		},
-		{
-			Name:        "Suspicious Downloads",
-			Pattern:     regexp.MustCompile(`(?i)(wget.*-O|curl.*-o|powershell.*download|invoke-webrequest)`),
-			RiskScore:   5,
-			ThreatVector: "Data Exfiltration",
-			Description: "Suspicious download activity detected",
-		},
-		{
-			Name:        "Keylogger",
-			Pattern:     regexp.MustCompile(`(?i)(keylog|keystroke|logkeys|pykeylogger)`),
-			RiskScore:   7,
-			ThreatVector: "Credential Access",
-			Description: "Keylogger activity detected",
-		},
-		{
-			Name:        "Process Injection",
-			Pattern:     regexp.MustCompile(`(?i)(inject|dllinject|process.*hollow|atom.*bombing)`),
-			RiskScore:   8,
-			ThreatVector: "Process Injection",
-			Description: "Process injection technique detected",
-		},
-	}
-	
-	for _, pattern := range patterns {
-		pm.securityPatterns[pattern.Name] = &pattern
-	}
-}
-
-func (pm *ProcessMonitor) analyzeSecurityThreats(cmdline, processName string) (string, int, string) {
-	if !pm.config.SecurityDetection {
-		return "", 0, ""
-	}
-	
-	var maxRiskScore int
-	var threatVector string
-	var alertMessage string
-	
-	for _, pattern := range pm.securityPatterns {
-		if pattern.Pattern.MatchString(cmdline) || pattern.Pattern.MatchString(processName) {
-			if pattern.RiskScore > maxRiskScore {
-				maxRiskScore = pattern.RiskScore
-				threatVector = pattern.ThreatVector
-				alertMessage = fmt.Sprintf("🚨 %s: %s", pattern.Name, pattern.Description)
-			}
-		}
-	}
-	
-	return threatVector, maxRiskScore, alertMessage
-}
-
-func (pm *ProcessMonitor) getSecurityLevel(riskScore int) string {
-	switch {
-	case riskScore >= 9:
-		return "CRITICAL"
-	case riskScore >= 7:
-		return "HIGH"
-	case riskScore >= 5:
-		return "MEDIUM"
-	case riskScore >= 3:
-		return "LOW"
-	default:
-		return "INFO"
-	}
-}
-
-func (pm *ProcessMonitor) StartMonitoring(ctx context.Context) {
-	ticker := time.NewTicker(pm.config.RefreshRate)
-	defer ticker.Stop()
-
+func monitorProcesses() {
 	for {
-		select {
-		case <-ctx.Done():
+		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
 			return
-		case <-ticker.C:
-			pm.scanProcesses()
-			if pm.config.MonitorNetwork {
-				pm.scanNetworkConnections()
-			}
-			if pm.config.MonitorFiles {
-				pm.scanFileOperations()
-			}
 		}
-	}
-}
 
-func (pm *ProcessMonitor) scanProcesses() {
-	pm.mutex.Lock()
-	defer pm.mutex.Unlock()
-
-	processes, err := process.Processes()
-	if err != nil {
-		return
-	}
-
-	currentPIDs := make(map[int32]bool)
-
-	for _, proc := range processes {
-		currentPIDs[proc.Pid] = true
-
-		if _, exists := pm.knownProcesses[proc.Pid]; !exists {
-			pm.handleNewProcess(proc)
-		} else {
-			pm.updateProcessInfo(proc)
-		}
-	}
-
-	for pid := range pm.knownProcesses {
-		if !currentPIDs[pid] {
-			pm.handleProcessExit(pid)
-		}
-	}
-}
-
-func (pm *ProcessMonitor) handleNewProcess(proc *process.Process) {
-	pm.knownProcesses[proc.Pid] = proc
-
-	cmdline, _ := proc.Cmdline()
-	username, _ := proc.Username()
-	ppid, _ := proc.Ppid()
-	createTime, _ := proc.CreateTime()
-
-	if pm.shouldFilter(proc, cmdline, username) {
-		return
-	}
-
-	processName := pm.getProcessName(proc)
-	threatVector, riskScore, alertMessage := pm.analyzeSecurityThreats(cmdline, processName)
-	
-	event := ProcessEvent{
-		Timestamp:     time.Unix(createTime/1000, 0),
-		PID:           proc.Pid,
-		PPID:          ppid,
-		ProcessName:   processName,
-		Command:       cmdline,
-		User:          username,
-		EventType:     "PROCESS_START",
-		Details:       fmt.Sprintf("Process started with PID %d", proc.Pid),
-		SecurityLevel: pm.getSecurityLevel(riskScore),
-		ThreatVector:  threatVector,
-		RiskScore:     riskScore,
-		AlertMessage:  alertMessage,
-	}
-
-	if riskScore > 0 {
-		pm.threatCount++
-	}
-
-	pm.events <- event
-}
-
-func (pm *ProcessMonitor) handleProcessExit(pid int32) {
-	proc := pm.knownProcesses[pid]
-	if proc == nil {
-		return
-	}
-
-	cmdline, _ := proc.Cmdline()
-	username, _ := proc.Username()
-	ppid, _ := proc.Ppid()
-
-	if pm.shouldFilter(proc, cmdline, username) {
-		delete(pm.knownProcesses, pid)
-		return
-	}
-
-	event := ProcessEvent{
-		Timestamp:   time.Now(),
-		PID:         pid,
-		PPID:        ppid,
-		ProcessName: pm.getProcessName(proc),
-		Command:     cmdline,
-		User:        username,
-		EventType:   "PROCESS_EXIT",
-		Details:     fmt.Sprintf("Process exited with PID %d", pid),
-	}
-
-	pm.events <- event
-	delete(pm.knownProcesses, pid)
-}
-
-func (pm *ProcessMonitor) updateProcessInfo(proc *process.Process) {
-	pm.knownProcesses[proc.Pid] = proc
-}
-
-func (pm *ProcessMonitor) scanNetworkConnections() {
-	// Network monitoring temporarily disabled due to type compatibility issues
-	// Will be implemented with proper gopsutil v3 types
-	return
-}
-
-func (pm *ProcessMonitor) scanFileOperations() {
-	processes, err := process.Processes()
-	if err != nil {
-		return
-	}
-
-	for _, proc := range processes {
-		openFiles, err := proc.OpenFiles()
+		files, err := ioutil.ReadDir("/proc")
 		if err != nil {
 			continue
 		}
 
-		if len(openFiles) > 0 {
-			cmdline, _ := proc.Cmdline()
-			username, _ := proc.Username()
-			ppid, _ := proc.Ppid()
-
-			if pm.shouldFilter(proc, cmdline, username) {
+		for _, f := range files {
+			if !f.IsDir() {
 				continue
 			}
 
-			for _, file := range openFiles {
-				event := ProcessEvent{
-					Timestamp:   time.Now(),
-					PID:         proc.Pid,
-					PPID:        ppid,
-					ProcessName: pm.getProcessName(proc),
-					Command:     cmdline,
-					User:        username,
-					EventType:   "FILE_ACCESS",
-					Details:     "File access detected",
-					FilePath:    file.Path,
-				}
-
-				pm.events <- event
+			var pid int
+			if _, err := fmt.Sscanf(f.Name(), "%d", &pid); err != nil {
+				continue
 			}
+
+			processMutex.Lock()
+			if seenProcesses[pid] {
+				processMutex.Unlock()
+				continue
+			}
+			processMutex.Unlock()
+
+			event := getProcessInfo(pid)
+			if event == nil {
+				continue
+			}
+
+			if shouldFilterEvent(event) {
+				continue
+			}
+
+			processMutex.Lock()
+			seenProcesses[pid] = true
+			processMutex.Unlock()
+
+			outputEvent(event)
 		}
+
+		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
 	}
 }
 
-func (pm *ProcessMonitor) shouldFilter(proc *process.Process, cmdline, username string) bool {
-	if len(pm.config.FilterProcesses) > 0 {
-		processName := pm.getProcessName(proc)
-		for _, filter := range pm.config.FilterProcesses {
-			if strings.Contains(strings.ToLower(processName), strings.ToLower(filter)) ||
-				strings.Contains(strings.ToLower(cmdline), strings.ToLower(filter)) {
-				return false
+func getProcessInfo(pid int) *ProcessEvent {
+	cmdlineBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil
+	}
+
+	cmdline := strings.ReplaceAll(string(cmdlineBytes), "\x00", " ")
+	cmdline = strings.TrimSpace(cmdline)
+
+	if cmdline == "" {
+		return nil
+	}
+
+	statBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return nil
+	}
+
+	statFields := strings.Fields(string(statBytes))
+	if len(statFields) < 4 {
+		return nil
+	}
+
+	var ppid int
+	fmt.Sscanf(statFields[3], "%d", &ppid)
+
+	statusBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	var user string
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(statusBytes)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "Uid:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					user = getUserName(fields[1])
+				}
+				break
 			}
 		}
+	}
+
+	var cwd string
+	if cwdLink, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
+		cwd = cwdLink
+	}
+
+	event := &ProcessEvent{
+		Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
+		PID:        pid,
+		PPID:       ppid,
+		User:       user,
+		Command:    strings.Split(cmdline, " ")[0],
+		CmdLine:    cmdline,
+		Cwd:        cwd,
+		Suspicious: isSuspicious(cmdline),
+	}
+
+	if config.IncludeEnv {
+		event.Environment = getEnvironment(pid)
+	}
+
+	return event
+}
+
+func getUserName(uid string) string {
+	cmd := exec.Command("getent", "passwd", uid)
+	output, err := cmd.Output()
+	if err != nil {
+		return uid
+	}
+
+	fields := strings.Split(string(output), ":")
+	if len(fields) > 0 {
+		return fields[0]
+	}
+
+	return uid
+}
+
+func getEnvironment(pid int) map[string]string {
+	env := make(map[string]string)
+	envBytes, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return env
+	}
+
+	envVars := strings.Split(string(envBytes), "\x00")
+	for _, e := range envVars {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			env[parts[0]] = parts[1]
+		}
+	}
+
+	return env
+}
+
+func isSuspicious(cmdline string) bool {
+	cmdlineLower := strings.ToLower(cmdline)
+	for _, term := range suspiciousTerms {
+		if strings.Contains(cmdlineLower, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldFilterEvent(event *ProcessEvent) bool {
+	if config.SuspiciousOnly && !event.Suspicious {
 		return true
 	}
 
-	if len(pm.config.FilterUsers) > 0 {
-		for _, filter := range pm.config.FilterUsers {
-			if strings.Contains(strings.ToLower(username), strings.ToLower(filter)) {
-				return false
-			}
-		}
+	if config.FilterUser != "" && event.User != config.FilterUser {
 		return true
 	}
 
-	if len(pm.config.FilterCommands) > 0 {
-		for _, filter := range pm.config.FilterCommands {
-			if strings.Contains(strings.ToLower(cmdline), strings.ToLower(filter)) {
-				return false
-			}
+	if config.FilterCmd != "" {
+		matched, _ := regexp.MatchString(config.FilterCmd, event.CmdLine)
+		if !matched {
+			return true
 		}
-		return true
 	}
 
 	return false
 }
 
-func (pm *ProcessMonitor) getProcessName(proc *process.Process) string {
-	name, err := proc.Name()
+func outputEvent(event *ProcessEvent) {
+	outputMutex.Lock()
+	defer outputMutex.Unlock()
+
+	eventCount++
+
+	if config.OutputJSON {
+		jsonData, _ := json.Marshal(event)
+		output := string(jsonData)
+
+		if config.OutputFile != "" {
+			appendToFile(output)
+		} else {
+			fmt.Println(output)
+		}
+		return
+	}
+
+	color := ColorWhite
+	if event.Suspicious {
+		color = ColorRed
+	}
+
+	output := fmt.Sprintf("%s[%s] PID: %d | PPID: %d | User: %s%s\n",
+		color, event.Timestamp, event.PID, event.PPID, event.User, ColorReset)
+	output += fmt.Sprintf("%s  ↳ CMD: %s%s\n", color, event.CmdLine, ColorReset)
+
+	if event.Cwd != "" {
+		output += fmt.Sprintf("%s  ↳ CWD: %s%s\n", ColorCyan, event.Cwd, ColorReset)
+	}
+
+	if event.Suspicious {
+		output += fmt.Sprintf("%s  ⚠ SUSPICIOUS ACTIVITY DETECTED!%s\n", ColorRed, ColorReset)
+	}
+
+	if config.OutputFile != "" {
+		appendToFile(output)
+	} else {
+		fmt.Print(output)
+	}
+}
+
+func monitorFileSystem() {
+	if !config.Quiet {
+		fmt.Printf("%s[*] File system monitoring is experimental%s\n", ColorYellow, ColorReset)
+	}
+
+	watchDirs := []string{"/tmp", "/var/tmp", "/dev/shm", "/etc"}
+
+	for {
+		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
+			return
+		}
+
+		for _, dir := range watchDirs {
+			filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+
+				if info.ModTime().After(time.Now().Add(-time.Duration(config.Interval) * time.Millisecond)) {
+					event := &FileEvent{
+						Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+						Path:      path,
+						Event:     "MODIFIED",
+					}
+
+					if config.OutputJSON {
+						jsonData, _ := json.Marshal(event)
+						fmt.Println(string(jsonData))
+					} else {
+						fmt.Printf("%s[%s] FILE: %s - %s%s\n",
+							ColorYellow, event.Timestamp, event.Event, event.Path, ColorReset)
+					}
+				}
+
+				return nil
+			})
+		}
+
+		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
+	}
+}
+
+func monitorNetwork() {
+	if !config.Quiet {
+		fmt.Printf("%s[*] Network monitoring started%s\n", ColorCyan, ColorReset)
+	}
+
+	seenConnections := make(map[string]bool)
+
+	for {
+		if config.MaxEvents > 0 && eventCount >= config.MaxEvents {
+			return
+		}
+
+		connections := getNetworkConnections()
+		for _, conn := range connections {
+			key := fmt.Sprintf("%s:%s->%s", conn.Protocol, conn.LocalAddr, conn.RemoteAddr)
+			if !seenConnections[key] {
+				seenConnections[key] = true
+
+				if config.OutputJSON {
+					jsonData, _ := json.Marshal(conn)
+					fmt.Println(string(jsonData))
+				} else {
+					fmt.Printf("%s[%s] NET: %s | %s -> %s | State: %s | PID: %d (%s)%s\n",
+						ColorBlue, conn.Timestamp, conn.Protocol, conn.LocalAddr,
+						conn.RemoteAddr, conn.State, conn.PID, conn.Process, ColorReset)
+				}
+			}
+		}
+
+		time.Sleep(time.Duration(config.Interval) * time.Millisecond)
+	}
+}
+
+func getNetworkConnections() []NetworkEvent {
+	var events []NetworkEvent
+
+	tcpFile, err := ioutil.ReadFile("/proc/net/tcp")
+	if err != nil {
+		return events
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(tcpFile)))
+	scanner.Scan()
+
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 10 {
+			continue
+		}
+
+		event := NetworkEvent{
+			Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
+			Protocol:   "TCP",
+			LocalAddr:  parseAddr(fields[1]),
+			RemoteAddr: parseAddr(fields[2]),
+			State:      getTCPState(fields[3]),
+		}
+
+		fmt.Sscanf(fields[9], "%d", &event.PID)
+		event.Process = getProcessName(event.PID)
+
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func parseAddr(addr string) string {
+	parts := strings.Split(addr, ":")
+	if len(parts) != 2 {
+		return addr
+	}
+	return addr
+}
+
+func getTCPState(state string) string {
+	states := map[string]string{
+		"01": "ESTABLISHED",
+		"02": "SYN_SENT",
+		"03": "SYN_RECV",
+		"04": "FIN_WAIT1",
+		"05": "FIN_WAIT2",
+		"06": "TIME_WAIT",
+		"07": "CLOSE",
+		"08": "CLOSE_WAIT",
+		"09": "LAST_ACK",
+		"0A": "LISTEN",
+		"0B": "CLOSING",
+	}
+
+	if s, ok := states[state]; ok {
+		return s
+	}
+	return "UNKNOWN"
+}
+
+func getProcessName(pid int) string {
+	cmdline, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		return "unknown"
 	}
-	return name
+
+	name := strings.ReplaceAll(string(cmdline), "\x00", " ")
+	name = strings.TrimSpace(name)
+
+	if name == "" {
+		return "unknown"
+	}
+
+	return strings.Split(name, " ")[0]
 }
 
-func (pm *ProcessMonitor) ProcessEvents(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-pm.events:
-			pm.handleEvent(event)
-		}
-	}
-}
-
-func (pm *ProcessMonitor) handleEvent(event ProcessEvent) {
-	if pm.config.LogToFile && pm.logFile != nil {
-		pm.writeToLogFile(event)
-	}
-
-	if pm.config.JSONOutput {
-		pm.outputJSON(event)
-	} else {
-		pm.outputFormatted(event)
-	}
-}
-
-func (pm *ProcessMonitor) writeToLogFile(event ProcessEvent) {
-	if pm.logFile == nil {
-		return
-	}
-
-	pm.checkLogFileSize()
-
-	var data []byte
-	var err error
-
-	if pm.config.JSONOutput {
-		data, err = json.Marshal(event)
-	} else {
-		data = []byte(pm.formatEventText(event) + "\n")
-	}
-
-	if err == nil {
-		pm.logFile.Write(data)
-	}
-}
-
-func (pm *ProcessMonitor) checkLogFileSize() {
-	if pm.logFile == nil {
-		return
-	}
-
-	stat, err := pm.logFile.Stat()
+func appendToFile(content string) {
+	f, err := os.OpenFile(config.OutputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening output file: %v\n", err)
 		return
 	}
+	defer f.Close()
 
-	if stat.Size() > pm.config.MaxLogSize {
-		pm.logFile.Close()
-		pm.rotateLogFile()
-		pm.SetupLogFile()
-	}
-}
-
-func (pm *ProcessMonitor) rotateLogFile() {
-	timestamp := time.Now().Format("20060102_150405")
-	rotatedFile := fmt.Sprintf("%s.%s", pm.config.LogFile, timestamp)
-	os.Rename(pm.config.LogFile, rotatedFile)
-}
-
-func (pm *ProcessMonitor) outputJSON(event ProcessEvent) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
-	fmt.Println(string(data))
-}
-
-func (pm *ProcessMonitor) outputFormatted(event ProcessEvent) {
-	if !pm.config.ColorOutput {
-		fmt.Println(pm.formatEventText(event))
-		return
-	}
-
-	timestamp := event.Timestamp.Format("15:04:05")
-	pidStr := fmt.Sprintf("%d", event.PID)
-	ppidStr := fmt.Sprintf("%d", event.PPID)
-
-	switch event.EventType {
-	case "PROCESS_START":
-		pm.printProcessStart(event, timestamp, pidStr, ppidStr)
-	case "PROCESS_EXIT":
-		color.New(color.FgRed).Printf("[%s] ", timestamp)
-		color.New(color.FgRed).Printf("EXIT  ")
-		color.New(color.FgYellow).Printf("PID:%s ", pidStr)
-		color.New(color.FgBlue).Printf("PPID:%s ", ppidStr)
-		color.New(color.FgMagenta).Printf("USER:%s ", event.User)
-		color.New(color.FgWhite).Printf("%s\n", event.ProcessName)
-	case "NETWORK_CONNECTION":
-		color.New(color.FgBlue).Printf("[%s] ", timestamp)
-		color.New(color.FgCyan).Printf("NET   ")
-		color.New(color.FgYellow).Printf("PID:%s ", pidStr)
-		color.New(color.FgMagenta).Printf("USER:%s ", event.User)
-		color.New(color.FgWhite).Printf("%s ", event.ProcessName)
-		color.New(color.FgHiBlue).Printf("%s\n", event.NetworkInfo)
-	case "FILE_ACCESS":
-		color.New(color.FgYellow).Printf("[%s] ", timestamp)
-		color.New(color.FgCyan).Printf("FILE  ")
-		color.New(color.FgYellow).Printf("PID:%s ", pidStr)
-		color.New(color.FgMagenta).Printf("USER:%s ", event.User)
-		color.New(color.FgWhite).Printf("%s ", event.ProcessName)
-		color.New(color.FgHiYellow).Printf("%s\n", event.FilePath)
-	}
-}
-
-func (pm *ProcessMonitor) printProcessStart(event ProcessEvent, timestamp, pidStr, ppidStr string) {
-	if event.RiskScore > 0 && pm.config.HighlightThreats {
-		pm.printThreatEvent(event, timestamp, pidStr, ppidStr)
-	} else {
-		color.New(color.FgGreen).Printf("[%s] ", timestamp)
-		color.New(color.FgCyan).Printf("START ")
-		color.New(color.FgYellow).Printf("PID:%s ", pidStr)
-		color.New(color.FgBlue).Printf("PPID:%s ", ppidStr)
-		color.New(color.FgMagenta).Printf("USER:%s ", event.User)
-		color.New(color.FgWhite).Printf("%s ", event.ProcessName)
-		color.New(color.FgHiBlack).Printf("%s\n", event.Command)
-	}
-}
-
-func (pm *ProcessMonitor) printThreatEvent(event ProcessEvent, timestamp, pidStr, ppidStr string) {
-	var bgColor color.Attribute
-	var fgColor color.Attribute
-	
-	switch event.SecurityLevel {
-	case "CRITICAL":
-		bgColor = color.BgRed
-		fgColor = color.FgWhite
-	case "HIGH":
-		bgColor = color.BgMagenta
-		fgColor = color.FgWhite
-	case "MEDIUM":
-		bgColor = color.BgYellow
-		fgColor = color.FgBlack
-	case "LOW":
-		bgColor = color.BgBlue
-		fgColor = color.FgWhite
-	default:
-		bgColor = color.BgGreen
-		fgColor = color.FgBlack
-	}
-	
-	color.New(bgColor, fgColor).Printf("[%s] ", timestamp)
-	color.New(bgColor, fgColor).Printf("🚨 THREAT ")
-	color.New(color.FgYellow).Printf("PID:%s ", pidStr)
-	color.New(color.FgBlue).Printf("PPID:%s ", ppidStr)
-	color.New(color.FgMagenta).Printf("USER:%s ", event.User)
-	color.New(color.FgWhite).Printf("%s ", event.ProcessName)
-	color.New(color.FgRed).Printf("[%s] ", event.ThreatVector)
-	color.New(color.FgHiRed).Printf("RISK:%d ", event.RiskScore)
-	color.New(color.FgHiBlack).Printf("%s\n", event.Command)
-	
-	if event.AlertMessage != "" {
-		color.New(color.FgRed).Printf("    ⚠️  %s\n", event.AlertMessage)
-	}
-	
-	if pm.config.AlertMode && event.RiskScore >= pm.config.RiskThreshold {
-		color.New(color.BgRed, color.FgWhite).Printf("🚨 HIGH RISK ALERT: %s detected!\n", event.ThreatVector)
-	}
-}
-
-func (pm *ProcessMonitor) formatEventText(event ProcessEvent) string {
-	timestamp := event.Timestamp.Format("15:04:05")
-	return fmt.Sprintf("[%s] %s PID:%d PPID:%d USER:%s %s %s %s",
-		timestamp, event.EventType, event.PID, event.PPID, event.User,
-		event.ProcessName, event.Command, event.Details)
-}
-
-func (pm *ProcessMonitor) DisplayHeader() {
-	if pm.config.JSONOutput {
-		return
-	}
-
-	header := `
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                              WIRN PROCESS SPY                              ║
-║                        Advanced Process Monitoring Tool                    ║
-║                              pspy64 Alternative                           ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-`
-	fmt.Print(header)
-
-	if pm.config.StealthMode {
-		color.New(color.FgRed).Println("🔒 STEALTH MODE ENABLED")
-	}
-	if pm.config.LogToFile {
-		color.New(color.FgBlue).Printf("📝 Logging to: %s\n", pm.config.LogFile)
-	}
-	if pm.config.MonitorNetwork {
-		color.New(color.FgCyan).Println("🌐 Network monitoring enabled")
-	}
-	if pm.config.MonitorFiles {
-		color.New(color.FgYellow).Println("📁 File monitoring enabled")
-	}
-	if pm.config.SecurityDetection {
-		color.New(color.FgRed).Println("🛡️ Security pattern detection enabled")
-	}
-	if pm.config.AlertMode {
-		color.New(color.FgMagenta).Printf("🚨 Alert mode enabled (threshold: %d)\n", pm.config.RiskThreshold)
-	}
-	if pm.config.HighlightThreats {
-		color.New(color.FgYellow).Println("⚠️ Threat highlighting enabled")
-	}
-
-	fmt.Println()
-}
-
-func (pm *ProcessMonitor) Run(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(1 * time.Second):
-			if pm.config.StealthMode {
-				pm.performEvasion()
-			}
-		}
-	}
-}
-
-func enableStealthMode() {
-	if runtime.GOOS == "linux" {
-		// Linux-specific stealth techniques would go here
-		// Note: unix.Prctl is not available on Windows
-	}
-}
-
-func (pm *ProcessMonitor) performEvasion() {
-	pm.evasionCount++
-
-	if pm.evasionCount%100 == 0 {
-		if runtime.GOOS == "linux" {
-			// Linux-specific evasion techniques would go here
-			// Note: unix.Prctl is not available on Windows
-		}
-	}
-}
-
-func (pm *ProcessMonitor) GetProcessStats() map[string]interface{} {
-	pm.mutex.RLock()
-	defer pm.mutex.RUnlock()
-
-	stats := make(map[string]interface{})
-	stats["total_processes"] = len(pm.knownProcesses)
-
-	userCounts := make(map[string]int)
-	processCounts := make(map[string]int)
-
-	for _, proc := range pm.knownProcesses {
-		username, _ := proc.Username()
-		processName := pm.getProcessName(proc)
-
-		userCounts[username]++
-		processCounts[processName]++
-	}
-
-	stats["users"] = userCounts
-	stats["processes"] = processCounts
-
-	return stats
+	f.WriteString(content + "\n")
 }

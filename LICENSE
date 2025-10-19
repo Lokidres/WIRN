@@ -1,8 +1,6 @@
-# WIRN - Advanced Process Spy Tool
+MIT License
 
-## License
-
-Copyright (c) 2024 WIRN Project
+Copyright (c) 2025 Lokidres
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -21,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-## Disclaimer
-
-This tool is designed for educational purposes and authorized penetration testing only.
-Users are responsible for complying with all local laws and regulations when using this tool.
-The authors accept no responsibility for any misuse of this tool.
-
-## Usage Restrictions
-
-- ✅ Authorized penetration testing
-- ✅ Educational use
-- ✅ Testing on your own systems
-- ❌ Unauthorized system access
-- ❌ Malicious use
-- ❌ Illegal activities
